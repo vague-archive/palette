@@ -1,0 +1,271 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+
+Description: >
+  Provision the palette asset management service
+
+Parameters:
+  AssetBucketBaseName:
+    Type: String
+    Description: Base name of the S3 bucket that holds assets
+  ACMCertificateArn:
+    Type: String
+    Description: ARN of the AWS ACM certificate for palette.void.dev
+
+Resources:
+  #################### S3 ####################
+  # S3 bucket to store assets
+  AssetBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AssetBucketBaseName}-${AWS::AccountId}"
+      PublicAccessBlockConfiguration: # Disallow ALL public access to bucket contents
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration: 
+        Status: Enabled
+  # Policy *only* allows cloudfront distribution to serve s3 objects
+  AssetBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AssetBucket
+      PolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: cloudfront.amazonaws.com
+          Action: 
+            - s3:GetObject
+            - s3:GetObjectVersion
+            - s3:ListBucket
+          Resource: 
+            - !Sub '${AssetBucket.Arn}/*'
+            - !GetAtt AssetBucket.Arn
+          Condition:
+            StringEquals:
+              AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${AssetDistribution.Id}"
+  
+  #################### Cloudfront ####################
+  # Distribution to serve assets
+  AssetDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - palette.void.dev
+        Enabled: True
+        CacheBehaviors:
+          - PathPattern: /upload
+            TargetOriginId: UploadSigningLambdaOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # CachingDisabled https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html#managed-cache-policy-caching-disabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # Managed-AllViewerExceptHostHeader https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-origin-request-policies.html#managed-origin-request-policy-all-viewer-except-host-header
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt CloudfrontAuthAndRewriteFunction.FunctionARN
+          - PathPattern: /list
+            TargetOriginId: ListAssetsLambdaOrigin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # CachingDisabled
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac # Managed-AllViewerExceptHostHeader
+            ResponseHeadersPolicyId: !GetAtt CORSResponseHeaderPolicy.Id
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt CloudfrontAuthAndRewriteFunction.FunctionARN
+        Comment: !Sub ${AWS::StackName} distribution
+        DefaultCacheBehavior:
+          CachePolicyId: !Ref S3VersionedCachingPolicy
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt CloudfrontAuthAndRewriteFunction.FunctionARN
+        Origins:
+          - DomainName: !GetAtt AssetBucket.RegionalDomainName
+            Id: S3Origin
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+            OriginAccessControlId: !GetAtt S3OriginAccessControl.Id
+          # !GetAtt on the function URL returns the full protocol (ie https://) url
+          - DomainName: !Select [2, !Split ["/", !GetAtt UploadSigningFunctionUrl.FunctionUrl]]
+            Id: UploadSigningLambdaOrigin
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+            OriginAccessControlId: !GetAtt LambdaOriginAccessControl.Id
+          - DomainName: !Select [2, !Split ["/", !GetAtt ListAssetsFunctionUrl.FunctionUrl]]
+            Id: ListAssetsLambdaOrigin
+            CustomOriginConfig:
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+            OriginAccessControlId: !GetAtt LambdaOriginAccessControl.Id
+        ViewerCertificate:
+          AcmCertificateArn: !Ref ACMCertificateArn
+          MinimumProtocolVersion: TLSv1.2_2021
+          SslSupportMethod: sni-only
+    
+  SigningSecretStore:
+    Type: AWS::CloudFront::KeyValueStore
+    Properties:
+      Name: !Sub "${AWS::StackName}-auth-kvs"
+      Comment: Holds JWT signing key
+
+  CloudfrontAuthAndRewriteFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      FunctionCode: <Palette-Auth-Code>
+      FunctionConfig:
+        Comment: Cloudfront function that validates JWTs and restricts users to their org
+        Runtime: cloudfront-js-2.0
+        KeyValueStoreAssociations:
+          - KeyValueStoreARN: !GetAtt SigningSecretStore.Arn
+      Name: !Sub "${AWS::StackName}-cloudfront-auth"
+      AutoPublish: true
+
+  S3OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties: 
+      OriginAccessControlConfig:
+        Description: Asset bucket origin access control
+        Name: !Sub "${AWS::StackName}-S3-OAC"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always # Force https
+        SigningProtocol: sigv4
+  
+  S3VersionedCachingPolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        DefaultTTL: 86400
+        MaxTTL: 31536000
+        MinTTL: 1
+        Name: CachingOptimizedByVersionId
+        ParametersInCacheKeyAndForwardedToOrigin:
+          CookiesConfig:
+            CookieBehavior: none
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: whitelist
+            QueryStrings:
+              - versionId
+  
+  CORSResponseHeaderPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: AllowCORSFromEditor
+        CorsConfig:
+          AccessControlAllowCredentials: true
+          AccessControlAllowHeaders:
+            Items:
+              - authorization
+          AccessControlAllowMethods:
+            Items:
+              - GET
+              - OPTIONS
+          AccessControlAllowOrigins: # Allow editor (runs on localhost:5173)
+            Items:
+              - http://localhost:5173
+              - https://localhost:5173
+          AccessControlMaxAgeSec: 600
+          OriginOverride: true
+
+  LambdaOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Description: Upload lambda origin access control
+        Name: !Sub "${AWS::StackName}-Lambda-OAC"
+        OriginAccessControlOriginType: lambda
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  #################### Lambda ####################
+  UploadSigningFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: dist
+      Handler: signUpload.handler
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          ASSETS_BUCKET: !Ref AssetBucket
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObject
+            Resource: !Sub '${AssetBucket.Arn}/*'
+
+  UploadSigningFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt UploadSigningFunction.Arn
+      AuthType: AWS_IAM
+  
+  UploadSigningFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UploadSigningFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: cloudfront.amazonaws.com
+      FunctionUrlAuthType: AWS_IAM
+      SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${AssetDistribution.Id}"
+
+  # New Lambda function for listing assets
+  ListAssetsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: dist
+      Handler: listAssets.handler
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          ASSETS_BUCKET: !Ref AssetBucket
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource: !GetAtt AssetBucket.Arn
+
+  ListAssetsFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt ListAssetsFunction.Arn
+      AuthType: AWS_IAM
+  
+  ListAssetsFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ListAssetsFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: cloudfront.amazonaws.com
+      FunctionUrlAuthType: AWS_IAM
+      SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${AssetDistribution.Id}"
+
+Outputs:
+  AssetBucketName:
+    Description: Name of the S3 bucket holding assets
+    Value: !Ref AssetBucket
+
+  AssetDistributionDomainName:
+    Description: Domain name of the CloudFront distribution
+    Value: !GetAtt AssetDistribution.DomainName
+
+  SigningSecretStoreArn:
+    Description: ARN of the Cloudfront KVS for the auth signing secret
+    Value: !GetAtt SigningSecretStore.Arn

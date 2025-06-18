@@ -1,0 +1,22 @@
+{
+  "name": "palette",
+  "version": "1.0.0",
+  "description": "Serverless app to allow storing and retrieving assets from s3",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.802.0",
+    "@aws-sdk/s3-request-presigner": "^3.802.0",
+    "@types/node": "^22.15.3",
+    "bowser": "^2.11.0",
+    "cloudfront": "^0.4.1",
+    "fast-xml-parser": "^4.4.1",
+    "strnum": "^1.1.2",
+    "tslib": "^2.8.1",
+    "typescript": "^5.8.3",
+    "undici-types": "^6.21.0",
+    "uuid": "^9.0.1"
+  },
+  "scripts": {
+    "build": "./scripts/build.sh",
+    "dev:deploy": "./scripts/deploy.sh dev"
+  }
+}

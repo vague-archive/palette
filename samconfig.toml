@@ -1,0 +1,20 @@
+version = 0.1
+[default.deploy.parameters]
+stack_name = "palette-dev"
+resolve_s3 = true
+s3_prefix = "palette-dev"
+region = "us-west-2"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "AssetBucketBaseName=\"palette-assets\" ACMCertificateArn=\"arn:aws:acm:us-east-1:339712894694:certificate/4f826fd5-064e-4568-8b12-77fe1fe4b729\""
+image_repositories = []
+
+[dev.deploy.parameters]
+stack_name = "palette-dev"
+resolve_s3 = true
+s3_prefix = "palette-dev"
+region = "us-west-2"
+confirm_changeset = true
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "AssetBucketBaseName=\"palette-assets\""
+image_repositories = []
